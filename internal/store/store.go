@@ -314,3 +314,108 @@ func normalizeIndex(idx, length int) int {
 	}
 	return idx
 }
+
+// ---------- Hash commands ----------
+
+// HSet sets a single field to value within the hash stored at key,
+// creating the hash if it doesn't exist yet. Returns true if the
+// field was newly created, false if it already existed and was
+// just updated — matching real Redis's HSET return semantics.
+func (s *Store) HSet(key, field, value string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	hash, err := s.getOrCreateHash(key)
+	if err != nil {
+		return false, err
+	}
+
+	_, existed := hash[field]
+	hash[field] = value
+	s.data[key] = hash
+	return !existed, nil
+}
+
+// HGet retrieves the value of a single field within the hash at key.
+// The second return value reports whether the field (and key) existed.
+func (s *Store) HGet(key, field string) (string, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	hash, exists, err := s.getHash(key)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, nil
+	}
+	value, fieldExists := hash[field]
+	return value, fieldExists, nil
+}
+
+// HGetAll returns all field-value pairs in the hash at key, as a
+// flat slice: [field1, value1, field2, value2, ...]. Order is not
+// guaranteed, matching Go's map iteration and real Redis semantics.
+func (s *Store) HGetAll(key string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	hash, exists, err := s.getHash(key)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return []string{}, nil
+	}
+
+	result := make([]string, 0, len(hash)*2)
+	for field, value := range hash {
+		result = append(result, field, value)
+	}
+	return result, nil
+}
+
+// HDel removes a single field from the hash at key.
+// Returns true if the field existed and was deleted.
+func (s *Store) HDel(key, field string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	hash, exists, err := s.getHash(key)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+
+	_, fieldExists := hash[field]
+	if fieldExists {
+		delete(hash, field)
+		s.data[key] = hash
+	}
+	return fieldExists, nil
+}
+
+func (s *Store) getHash(key string) (map[string]string, bool, error) {
+	raw, exists := s.data[key]
+	if !exists {
+		return nil, false, nil
+	}
+	hash, ok := raw.(map[string]string)
+	if !ok {
+		return nil, true, ErrWrongType
+	}
+	return hash, true, nil
+}
+
+func (s *Store) getOrCreateHash(key string) (map[string]string, error) {
+	hash, exists, err := s.getHash(key)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return make(map[string]string), nil
+	}
+	return hash, nil
+}

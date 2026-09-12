@@ -15,8 +15,6 @@ func TestConcurrentAccess(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	// Spin up 50 goroutines, each doing 100 SET/GET operations
-	// on the SAME shared store, all at the same time.
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -24,7 +22,7 @@ func TestConcurrentAccess(t *testing.T) {
 			for j := 0; j < 100; j++ {
 				key := fmt.Sprintf("key-%d", id)
 				s.Set(key, "value")
-				_, _ = s.Get(key)
+				_, _, _ = s.Get(key)
 				_ = s.Exists(key)
 			}
 		}(i)

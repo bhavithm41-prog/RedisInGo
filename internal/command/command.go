@@ -70,10 +70,20 @@ func (h *Handler) dispatch(cmd string, args []string) string {
 		return h.cmdSIsMember(args)
 	case "SMEMBERS":
 		return h.cmdSMembers(args)
+	case "HSET":
+		return h.cmdHSet(args)
+	case "HGET":
+		return h.cmdHGet(args)
+	case "HGETALL":
+		return h.cmdHGetAll(args)
+	case "HDEL":
+		return h.cmdHDel(args)
 	default:
 		return fmt.Sprintf("ERR unknown command '%s'", cmd)
 	}
 }
+
+// ---------- String / generic commands ----------
 
 func (h *Handler) cmdPing(args []string) string {
 	if len(args) != 0 {
@@ -152,6 +162,8 @@ func (h *Handler) cmdFlushDB(args []string) string {
 	}
 	return "OK"
 }
+
+// ---------- List commands ----------
 
 func (h *Handler) cmdLPush(args []string) string {
 	if len(args) < 2 {
@@ -273,4 +285,62 @@ func (h *Handler) cmdSMembers(args []string) string {
 		return "(empty set)"
 	}
 	return strings.Join(members, " ")
+}
+
+// ---------- Hash commands ----------
+
+func (h *Handler) cmdHSet(args []string) string {
+	if len(args) != 3 {
+		return "ERR wrong number of arguments for 'HSET'"
+	}
+	created, err := h.store.HSet(args[0], args[1], args[2])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if created {
+		return "1"
+	}
+	return "0"
+}
+
+func (h *Handler) cmdHGet(args []string) string {
+	if len(args) != 2 {
+		return "ERR wrong number of arguments for 'HGET'"
+	}
+	value, exists, err := h.store.HGet(args[0], args[1])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if !exists {
+		return "(nil)"
+	}
+	return value
+}
+
+func (h *Handler) cmdHGetAll(args []string) string {
+	if len(args) != 1 {
+		return "ERR wrong number of arguments for 'HGETALL'"
+	}
+	pairs, err := h.store.HGetAll(args[0])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if len(pairs) == 0 {
+		return "(empty hash)"
+	}
+	return strings.Join(pairs, " ")
+}
+
+func (h *Handler) cmdHDel(args []string) string {
+	if len(args) != 2 {
+		return "ERR wrong number of arguments for 'HDEL'"
+	}
+	deleted, err := h.store.HDel(args[0], args[1])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if deleted {
+		return "1"
+	}
+	return "0"
 }
