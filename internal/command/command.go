@@ -8,21 +8,14 @@ import (
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
 
-// Handler holds a reference to the store so it can execute commands
-// against it. This keeps command logic separate from the raw
-// networking code in the server package.
 type Handler struct {
 	store *store.Store
 }
 
-// New creates a new command Handler backed by the given store.
 func New(s *store.Store) *Handler {
 	return &Handler{store: s}
 }
 
-// Execute parses a raw line of text into a command and arguments,
-// runs the command against the store, and returns a response string
-// (never including the trailing newline — the caller adds that).
 func (h *Handler) Execute(line string) string {
 	cmd, args := parseLine(line)
 	if cmd == "" {
@@ -31,9 +24,6 @@ func (h *Handler) Execute(line string) string {
 	return h.dispatch(cmd, args)
 }
 
-// parseLine splits a raw line into an uppercased command name and
-// its arguments. strings.Fields handles multiple/irregular spaces
-// gracefully, unlike a plain strings.Split.
 func parseLine(line string) (string, []string) {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
@@ -44,7 +34,6 @@ func parseLine(line string) (string, []string) {
 	return cmd, args
 }
 
-// dispatch executes a single parsed command against the store.
 func (h *Handler) dispatch(cmd string, args []string) string {
 	switch cmd {
 	case "PING":
@@ -63,6 +52,16 @@ func (h *Handler) dispatch(cmd string, args []string) string {
 		return h.cmdDBSize(args)
 	case "FLUSHDB":
 		return h.cmdFlushDB(args)
+	case "LPUSH":
+		return h.cmdLPush(args)
+	case "RPUSH":
+		return h.cmdRPush(args)
+	case "LPOP":
+		return h.cmdLPop(args)
+	case "RPOP":
+		return h.cmdRPop(args)
+	case "LRANGE":
+		return h.cmdLRange(args)
 	default:
 		return fmt.Sprintf("ERR unknown command '%s'", cmd)
 	}
@@ -87,7 +86,10 @@ func (h *Handler) cmdGet(args []string) string {
 	if len(args) != 1 {
 		return "ERR wrong number of arguments for 'GET'"
 	}
-	value, exists := h.store.Get(args[0])
+	value, exists, err := h.store.Get(args[0])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
 	if !exists {
 		return "(nil)"
 	}
@@ -141,4 +143,74 @@ func (h *Handler) cmdFlushDB(args []string) string {
 		h.store.Del(k)
 	}
 	return "OK"
+}
+
+func (h *Handler) cmdLPush(args []string) string {
+	if len(args) < 2 {
+		return "ERR wrong number of arguments for 'LPUSH'"
+	}
+	length, err := h.store.LPush(args[0], args[1:]...)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	return strconv.Itoa(length)
+}
+
+func (h *Handler) cmdRPush(args []string) string {
+	if len(args) < 2 {
+		return "ERR wrong number of arguments for 'RPUSH'"
+	}
+	length, err := h.store.RPush(args[0], args[1:]...)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	return strconv.Itoa(length)
+}
+
+func (h *Handler) cmdLPop(args []string) string {
+	if len(args) != 1 {
+		return "ERR wrong number of arguments for 'LPOP'"
+	}
+	value, popped, err := h.store.LPop(args[0])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if !popped {
+		return "(nil)"
+	}
+	return value
+}
+
+func (h *Handler) cmdRPop(args []string) string {
+	if len(args) != 1 {
+		return "ERR wrong number of arguments for 'RPOP'"
+	}
+	value, popped, err := h.store.RPop(args[0])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if !popped {
+		return "(nil)"
+	}
+	return value
+}
+
+func (h *Handler) cmdLRange(args []string) string {
+	if len(args) != 3 {
+		return "ERR wrong number of arguments for 'LRANGE'"
+	}
+	start, err1 := strconv.Atoi(args[1])
+	stop, err2 := strconv.Atoi(args[2])
+	if err1 != nil || err2 != nil {
+		return "ERR value is not an integer or out of range"
+	}
+
+	result, err := h.store.LRange(args[0], start, stop)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if len(result) == 0 {
+		return "(empty list)"
+	}
+	return strings.Join(result, " ")
 }
