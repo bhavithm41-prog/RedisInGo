@@ -2,29 +2,19 @@ package main
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/bhavithm41-prog/gocachedb/internal/server"
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
 
 func main() {
-	fmt.Println("GoCacheDB starting...")
-
 	s := store.New()
 
-	s.Set("name", "Bhavith")
+	srv := server.New("6380", s)
 
-	value, exists := s.Get("name")
-	if exists {
-		fmt.Println("GET name ->", value)
-	} else {
-		fmt.Println("GET name -> (nil)")
+	if err := srv.Start(); err != nil {
+		fmt.Println("Server error:", err)
+		os.Exit(1)
 	}
-
-	fmt.Println("EXISTS name ->", s.Exists("name"))
-	fmt.Println("KEYS ->", s.Keys())
-
-	deleted := s.Del("name")
-	fmt.Println("DEL name -> deleted:", deleted)
-
-	fmt.Println("EXISTS name ->", s.Exists("name"))
 }
