@@ -62,6 +62,14 @@ func (h *Handler) dispatch(cmd string, args []string) string {
 		return h.cmdRPop(args)
 	case "LRANGE":
 		return h.cmdLRange(args)
+	case "SADD":
+		return h.cmdSAdd(args)
+	case "SREM":
+		return h.cmdSRem(args)
+	case "SISMEMBER":
+		return h.cmdSIsMember(args)
+	case "SMEMBERS":
+		return h.cmdSMembers(args)
 	default:
 		return fmt.Sprintf("ERR unknown command '%s'", cmd)
 	}
@@ -213,4 +221,56 @@ func (h *Handler) cmdLRange(args []string) string {
 		return "(empty list)"
 	}
 	return strings.Join(result, " ")
+}
+
+// ---------- Set commands ----------
+
+func (h *Handler) cmdSAdd(args []string) string {
+	if len(args) < 2 {
+		return "ERR wrong number of arguments for 'SADD'"
+	}
+	added, err := h.store.SAdd(args[0], args[1:]...)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	return strconv.Itoa(added)
+}
+
+func (h *Handler) cmdSRem(args []string) string {
+	if len(args) < 2 {
+		return "ERR wrong number of arguments for 'SREM'"
+	}
+	removed, err := h.store.SRem(args[0], args[1:]...)
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	return strconv.Itoa(removed)
+}
+
+func (h *Handler) cmdSIsMember(args []string) string {
+	if len(args) != 2 {
+		return "ERR wrong number of arguments for 'SISMEMBER'"
+	}
+	isMember, err := h.store.SIsMember(args[0], args[1])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if isMember {
+		return "1"
+	}
+	return "0"
+}
+
+func (h *Handler) cmdSMembers(args []string) string {
+	if len(args) != 1 {
+		return "ERR wrong number of arguments for 'SMEMBERS'"
+	}
+	members, err := h.store.SMembers(args[0])
+	if err != nil {
+		return "ERR " + err.Error()
+	}
+	if len(members) == 0 {
+		return "(empty set)"
+	}
+	return strings.Join(members, " ")
 }

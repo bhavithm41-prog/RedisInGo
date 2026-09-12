@@ -6,15 +6,12 @@ import (
 )
 
 // ErrWrongType is returned when a command is used against a key
-// that holds a value of a different, incompatible type — e.g.
-// calling LPUSH on a key that currently holds a plain string.
+// that holds a value of a different, incompatible type.
 var ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 
 // Store is a thread-safe in-memory key-value store.
 // Values are stored as `any` so a single key can hold different
-// underlying types (string today; lists, sets, hashes in later phases).
-// A sync.RWMutex protects the map: multiple goroutines may read
-// concurrently, but writes are exclusive.
+// underlying types: string, []string (list), or map[string]struct{} (set).
 type Store struct {
 	mu   sync.RWMutex
 	data map[string]any
@@ -29,16 +26,12 @@ func New() *Store {
 
 // ---------- String commands ----------
 
-// Set stores a string value under the given key, overwriting
-// whatever was there before (regardless of its previous type).
 func (s *Store) Set(key, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data[key] = value
 }
 
-// Get retrieves a string value for a key.
-// Returns ErrWrongType if the key exists but holds a non-string value.
 func (s *Store) Get(key string) (string, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -47,7 +40,6 @@ func (s *Store) Get(key string) (string, bool, error) {
 	if !exists {
 		return "", false, nil
 	}
-
 	value, ok := raw.(string)
 	if !ok {
 		return "", true, ErrWrongType
@@ -55,10 +47,8 @@ func (s *Store) Get(key string) (string, bool, error) {
 	return value, true, nil
 }
 
-// ---------- Generic key commands (work on any type) ----------
+// ---------- Generic key commands ----------
 
-// Del removes a key from the store, regardless of its value's type.
-// It returns true if the key existed and was deleted.
 func (s *Store) Del(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,8 +59,6 @@ func (s *Store) Del(key string) bool {
 	return exists
 }
 
-// Exists reports whether a key is present in the store, regardless
-// of its value's type.
 func (s *Store) Exists(key string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -78,7 +66,6 @@ func (s *Store) Exists(key string) bool {
 	return exists
 }
 
-// Keys returns a slice of all keys currently in the store.
 func (s *Store) Keys() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -91,12 +78,6 @@ func (s *Store) Keys() []string {
 
 // ---------- List commands ----------
 
-// LPush inserts one or more values at the head (left) of the list
-// stored at key, creating the list if the key doesn't exist yet.
-// Values are pushed one at a time, so multiple values end up in
-// reverse order at the head — this matches real Redis semantics.
-// Returns the new length of the list, or ErrWrongType if the key
-// holds a non-list value.
 func (s *Store) LPush(key string, values ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -105,7 +86,6 @@ func (s *Store) LPush(key string, values ...string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-
 	for _, v := range values {
 		list = append([]string{v}, list...)
 	}
@@ -113,10 +93,6 @@ func (s *Store) LPush(key string, values ...string) (int, error) {
 	return len(list), nil
 }
 
-// RPush inserts one or more values at the tail (right) of the list
-// stored at key, creating the list if the key doesn't exist yet.
-// Returns the new length of the list, or ErrWrongType if the key
-// holds a non-list value.
 func (s *Store) RPush(key string, values ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -125,15 +101,11 @@ func (s *Store) RPush(key string, values ...string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-
 	list = append(list, values...)
 	s.data[key] = list
 	return len(list), nil
 }
 
-// LPop removes and returns the leftmost (first) element of the list
-// at key. The second return value reports whether an element was
-// popped (false if the key doesn't exist or the list is empty).
 func (s *Store) LPop(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,16 +117,12 @@ func (s *Store) LPop(key string) (string, bool, error) {
 	if !exists || len(list) == 0 {
 		return "", false, nil
 	}
-
 	value := list[0]
 	list = list[1:]
 	s.data[key] = list
 	return value, true, nil
 }
 
-// RPop removes and returns the rightmost (last) element of the list
-// at key. The second return value reports whether an element was
-// popped (false if the key doesn't exist or the list is empty).
 func (s *Store) RPop(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -166,7 +134,6 @@ func (s *Store) RPop(key string) (string, bool, error) {
 	if !exists || len(list) == 0 {
 		return "", false, nil
 	}
-
 	lastIdx := len(list) - 1
 	value := list[lastIdx]
 	list = list[:lastIdx]
@@ -174,10 +141,6 @@ func (s *Store) RPop(key string) (string, bool, error) {
 	return value, true, nil
 }
 
-// LRange returns the elements of the list at key between start and
-// stop, both inclusive. Negative indices count from the end of the
-// list (-1 is the last element). Out-of-range indices are clamped,
-// matching real Redis behavior, rather than erroring.
 func (s *Store) LRange(key string, start, stop int) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -204,17 +167,101 @@ func (s *Store) LRange(key string, start, stop int) ([]string, error) {
 		return []string{}, nil
 	}
 
-	// Copy the slice so callers can't mutate our internal list.
 	result := make([]string, stop-start+1)
 	copy(result, list[start:stop+1])
 	return result, nil
 }
 
+// ---------- Set commands ----------
+
+// SAdd adds one or more members to the set at key, creating the set
+// if it doesn't exist. Returns the number of members that were
+// newly added (members already present don't count).
+func (s *Store) SAdd(key string, members ...string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	set, err := s.getOrCreateSet(key)
+	if err != nil {
+		return 0, err
+	}
+
+	added := 0
+	for _, m := range members {
+		if _, exists := set[m]; !exists {
+			set[m] = struct{}{}
+			added++
+		}
+	}
+	s.data[key] = set
+	return added, nil
+}
+
+// SRem removes one or more members from the set at key.
+// Returns the number of members that were actually removed.
+func (s *Store) SRem(key string, members ...string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	set, exists, err := s.getSet(key)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, nil
+	}
+
+	removed := 0
+	for _, m := range members {
+		if _, exists := set[m]; exists {
+			delete(set, m)
+			removed++
+		}
+	}
+	s.data[key] = set
+	return removed, nil
+}
+
+// SIsMember reports whether member is present in the set at key.
+func (s *Store) SIsMember(key, member string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	set, exists, err := s.getSet(key)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	_, isMember := set[member]
+	return isMember, nil
+}
+
+// SMembers returns all members of the set at key, in no
+// guaranteed order (matching both Go's map iteration and real
+// Redis's own unordered set semantics).
+func (s *Store) SMembers(key string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	set, exists, err := s.getSet(key)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return []string{}, nil
+	}
+
+	members := make([]string, 0, len(set))
+	for m := range set {
+		members = append(members, m)
+	}
+	return members, nil
+}
+
 // ---------- Internal helpers ----------
 
-// getList fetches the list stored at key, if any.
-// Returns (nil, false, nil) if the key doesn't exist,
-// and (nil, true, ErrWrongType) if the key holds a non-list value.
 func (s *Store) getList(key string) ([]string, bool, error) {
 	raw, exists := s.data[key]
 	if !exists {
@@ -227,9 +274,6 @@ func (s *Store) getList(key string) ([]string, bool, error) {
 	return list, true, nil
 }
 
-// getOrCreateList fetches the list stored at key, creating an empty
-// one if the key doesn't exist yet. Must be called with the write
-// lock already held.
 func (s *Store) getOrCreateList(key string) ([]string, error) {
 	list, exists, err := s.getList(key)
 	if err != nil {
@@ -241,9 +285,29 @@ func (s *Store) getOrCreateList(key string) ([]string, error) {
 	return list, nil
 }
 
-// normalizeIndex converts a possibly-negative Redis-style index
-// into a real slice index. -1 means the last element, -2 the
-// second-to-last, and so on.
+func (s *Store) getSet(key string) (map[string]struct{}, bool, error) {
+	raw, exists := s.data[key]
+	if !exists {
+		return nil, false, nil
+	}
+	set, ok := raw.(map[string]struct{})
+	if !ok {
+		return nil, true, ErrWrongType
+	}
+	return set, true, nil
+}
+
+func (s *Store) getOrCreateSet(key string) (map[string]struct{}, error) {
+	set, exists, err := s.getSet(key)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return make(map[string]struct{}), nil
+	}
+	return set, nil
+}
+
 func normalizeIndex(idx, length int) int {
 	if idx < 0 {
 		return length + idx
