@@ -6,21 +6,22 @@ import (
 	"net"
 	"strings"
 
+	"github.com/bhavithm41-prog/gocachedb/internal/command"
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
 
 // Server holds everything our TCP server needs: the port to listen
-// on, and a reference to the shared in-memory store.
+// on, and a command handler backed by the shared in-memory store.
 type Server struct {
-	port  string
-	store *store.Store
+	port    string
+	handler *command.Handler
 }
 
 // New creates a new Server bound to the given port, using the given store.
 func New(port string, s *store.Store) *Server {
 	return &Server{
-		port:  port,
-		store: s,
+		port:    port,
+		handler: command.New(s),
 	}
 }
 
@@ -67,16 +68,9 @@ func (srv *Server) handleConnection(conn net.Conn) {
 			continue
 		}
 
-		response := srv.handleLine(line)
+		response := srv.handler.Execute(line)
 
 		writer.WriteString(response + "\n")
 		writer.Flush()
 	}
-}
-
-// handleLine is a placeholder command handler for Phase 2.
-// A real command parser arrives in Phase 3 — for now we just
-// echo back what we received, to prove the plumbing works.
-func (srv *Server) handleLine(line string) string {
-	return "ECHO: " + line
 }
