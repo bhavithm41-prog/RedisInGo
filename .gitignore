@@ -1,0 +1,21 @@
+# Binaries
+gocachedb
+*.exe
+*.out
+
+# Go build cache / test artifacts
+*.test
+*.prof
+
+# Data files created by the database itself (later phases)
+*.rdb
+*.aof
+data/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor folders
+.vscode/
+.idea/
