@@ -4,20 +4,31 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/bhavithm41-prog/gocachedb/internal/eviction"
 )
 
 var ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 
+// Store is a thread-safe in-memory key-value store supporting
+// strings, lists, sets, hashes, per-key expiration, and LRU
+// eviction once a configured key-count capacity is exceeded.
 type Store struct {
 	mu          sync.RWMutex
 	data        map[string]any
 	expirations map[string]time.Time
+	lru         *eviction.LRU
+	evictions   int // total number of keys evicted since startup, for future metrics (Phase 10)
 }
 
-func New() *Store {
+// New creates a new Store with the given maximum number of keys.
+// Once this many keys are present, inserting a new key evicts the
+// least recently used existing key.
+func New(maxKeys int) *Store {
 	return &Store{
 		data:        make(map[string]any),
 		expirations: make(map[string]time.Time),
+		lru:         eviction.New(maxKeys),
 	}
 }
 
@@ -33,20 +44,38 @@ func (s *Store) expireIfNeededLocked(key string) {
 	if s.isExpiredLocked(key) {
 		delete(s.data, key)
 		delete(s.expirations, key)
+		s.lru.Remove(key)
 	}
 }
+
+// touchAndEvictLocked records key as just-accessed, and if this
+// causes the LRU tracker to evict some other key, deletes that
+// evicted key's real data too. Must be called with the write lock
+// already held, since it may mutate s.data.
+func (s *Store) touchAndEvictLocked(key string) {
+	evictedKey, evicted := s.lru.Touch(key)
+	if evicted {
+		delete(s.data, evictedKey)
+		delete(s.expirations, evictedKey)
+		s.evictions++
+	}
+}
+
+// ---------- String commands ----------
 
 func (s *Store) Set(key, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data[key] = value
 	delete(s.expirations, key)
+	s.touchAndEvictLocked(key)
 }
 
 func (s *Store) Get(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	raw, exists := s.data[key]
 	if !exists {
 		return "", false, nil
@@ -55,8 +84,11 @@ func (s *Store) Get(key string) (string, bool, error) {
 	if !ok {
 		return "", true, ErrWrongType
 	}
+	s.touchAndEvictLocked(key)
 	return value, true, nil
 }
+
+// ---------- Generic key commands ----------
 
 func (s *Store) Del(key string) bool {
 	s.mu.Lock()
@@ -65,6 +97,7 @@ func (s *Store) Del(key string) bool {
 	if exists {
 		delete(s.data, key)
 		delete(s.expirations, key)
+		s.lru.Remove(key)
 	}
 	return exists
 }
@@ -89,6 +122,16 @@ func (s *Store) Keys() []string {
 	}
 	return keys
 }
+
+// Evictions returns the total number of keys evicted due to the
+// LRU capacity limit since the store was created.
+func (s *Store) Evictions() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.evictions
+}
+
+// ---------- Expiration commands ----------
 
 func (s *Store) Expire(key string, seconds int) bool {
 	s.mu.Lock()
@@ -126,6 +169,7 @@ func (s *Store) SetEx(key string, seconds int, value string) {
 	defer s.mu.Unlock()
 	s.data[key] = value
 	s.expirations[key] = time.Now().Add(time.Duration(seconds) * time.Second)
+	s.touchAndEvictLocked(key)
 }
 
 func (s *Store) CleanupExpired() int {
@@ -137,16 +181,20 @@ func (s *Store) CleanupExpired() int {
 		if now.After(expiry) {
 			delete(s.data, key)
 			delete(s.expirations, key)
+			s.lru.Remove(key)
 			removed++
 		}
 	}
 	return removed
 }
 
+// ---------- List commands ----------
+
 func (s *Store) LPush(key string, values ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	list, err := s.getOrCreateList(key)
 	if err != nil {
 		return 0, err
@@ -155,6 +203,7 @@ func (s *Store) LPush(key string, values ...string) (int, error) {
 		list = append([]string{v}, list...)
 	}
 	s.data[key] = list
+	s.touchAndEvictLocked(key)
 	return len(list), nil
 }
 
@@ -162,12 +211,14 @@ func (s *Store) RPush(key string, values ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	list, err := s.getOrCreateList(key)
 	if err != nil {
 		return 0, err
 	}
 	list = append(list, values...)
 	s.data[key] = list
+	s.touchAndEvictLocked(key)
 	return len(list), nil
 }
 
@@ -175,6 +226,7 @@ func (s *Store) LPop(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	list, exists, err := s.getList(key)
 	if err != nil {
 		return "", false, err
@@ -185,6 +237,7 @@ func (s *Store) LPop(key string) (string, bool, error) {
 	value := list[0]
 	list = list[1:]
 	s.data[key] = list
+	s.touchAndEvictLocked(key)
 	return value, true, nil
 }
 
@@ -192,6 +245,7 @@ func (s *Store) RPop(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	list, exists, err := s.getList(key)
 	if err != nil {
 		return "", false, err
@@ -203,6 +257,7 @@ func (s *Store) RPop(key string) (string, bool, error) {
 	value := list[lastIdx]
 	list = list[:lastIdx]
 	s.data[key] = list
+	s.touchAndEvictLocked(key)
 	return value, true, nil
 }
 
@@ -210,6 +265,7 @@ func (s *Store) LRange(key string, start, stop int) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	list, exists, err := s.getList(key)
 	if err != nil {
 		return nil, err
@@ -217,6 +273,8 @@ func (s *Store) LRange(key string, start, stop int) ([]string, error) {
 	if !exists || len(list) == 0 {
 		return []string{}, nil
 	}
+	s.touchAndEvictLocked(key)
+
 	length := len(list)
 	start = normalizeIndex(start, length)
 	stop = normalizeIndex(stop, length)
@@ -234,10 +292,13 @@ func (s *Store) LRange(key string, start, stop int) ([]string, error) {
 	return result, nil
 }
 
+// ---------- Set commands ----------
+
 func (s *Store) SAdd(key string, members ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	set, err := s.getOrCreateSet(key)
 	if err != nil {
 		return 0, err
@@ -250,6 +311,7 @@ func (s *Store) SAdd(key string, members ...string) (int, error) {
 		}
 	}
 	s.data[key] = set
+	s.touchAndEvictLocked(key)
 	return added, nil
 }
 
@@ -257,6 +319,7 @@ func (s *Store) SRem(key string, members ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	set, exists, err := s.getSet(key)
 	if err != nil {
 		return 0, err
@@ -279,6 +342,7 @@ func (s *Store) SIsMember(key, member string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	set, exists, err := s.getSet(key)
 	if err != nil {
 		return false, err
@@ -286,6 +350,7 @@ func (s *Store) SIsMember(key, member string) (bool, error) {
 	if !exists {
 		return false, nil
 	}
+	s.touchAndEvictLocked(key)
 	_, isMember := set[member]
 	return isMember, nil
 }
@@ -294,6 +359,7 @@ func (s *Store) SMembers(key string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	set, exists, err := s.getSet(key)
 	if err != nil {
 		return nil, err
@@ -301,6 +367,7 @@ func (s *Store) SMembers(key string) ([]string, error) {
 	if !exists {
 		return []string{}, nil
 	}
+	s.touchAndEvictLocked(key)
 	members := make([]string, 0, len(set))
 	for m := range set {
 		members = append(members, m)
@@ -308,10 +375,13 @@ func (s *Store) SMembers(key string) ([]string, error) {
 	return members, nil
 }
 
+// ---------- Hash commands ----------
+
 func (s *Store) HSet(key, field, value string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	hash, err := s.getOrCreateHash(key)
 	if err != nil {
 		return false, err
@@ -319,6 +389,7 @@ func (s *Store) HSet(key, field, value string) (bool, error) {
 	_, existed := hash[field]
 	hash[field] = value
 	s.data[key] = hash
+	s.touchAndEvictLocked(key)
 	return !existed, nil
 }
 
@@ -326,6 +397,7 @@ func (s *Store) HGet(key, field string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	hash, exists, err := s.getHash(key)
 	if err != nil {
 		return "", false, err
@@ -333,6 +405,7 @@ func (s *Store) HGet(key, field string) (string, bool, error) {
 	if !exists {
 		return "", false, nil
 	}
+	s.touchAndEvictLocked(key)
 	value, fieldExists := hash[field]
 	return value, fieldExists, nil
 }
@@ -341,6 +414,7 @@ func (s *Store) HGetAll(key string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	hash, exists, err := s.getHash(key)
 	if err != nil {
 		return nil, err
@@ -348,6 +422,7 @@ func (s *Store) HGetAll(key string) ([]string, error) {
 	if !exists {
 		return []string{}, nil
 	}
+	s.touchAndEvictLocked(key)
 	result := make([]string, 0, len(hash)*2)
 	for field, value := range hash {
 		result = append(result, field, value)
@@ -359,6 +434,7 @@ func (s *Store) HDel(key, field string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expireIfNeededLocked(key)
+
 	hash, exists, err := s.getHash(key)
 	if err != nil {
 		return false, err
@@ -373,6 +449,8 @@ func (s *Store) HDel(key, field string) (bool, error) {
 	}
 	return fieldExists, nil
 }
+
+// ---------- Internal helpers ----------
 
 func (s *Store) getList(key string) ([]string, bool, error) {
 	raw, exists := s.data[key]

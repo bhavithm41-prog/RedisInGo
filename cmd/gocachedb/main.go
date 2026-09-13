@@ -8,8 +8,10 @@ import (
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
 
+const maxKeys = 100 // MAXMEMORY-equivalent: max number of keys before LRU eviction kicks in
+
 func main() {
-	s := store.New()
+	s := store.New(maxKeys)
 
 	srv := server.New("6380", s)
 
