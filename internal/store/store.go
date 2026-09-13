@@ -3,39 +3,50 @@ package store
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
-// ErrWrongType is returned when a command is used against a key
-// that holds a value of a different, incompatible type.
 var ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 
-// Store is a thread-safe in-memory key-value store.
-// Values are stored as `any` so a single key can hold different
-// underlying types: string, []string (list), or map[string]struct{} (set).
 type Store struct {
-	mu   sync.RWMutex
-	data map[string]any
+	mu          sync.RWMutex
+	data        map[string]any
+	expirations map[string]time.Time
 }
 
-// New creates and returns a new, empty Store.
 func New() *Store {
 	return &Store{
-		data: make(map[string]any),
+		data:        make(map[string]any),
+		expirations: make(map[string]time.Time),
 	}
 }
 
-// ---------- String commands ----------
+func (s *Store) isExpiredLocked(key string) bool {
+	expiry, hasExpiry := s.expirations[key]
+	if !hasExpiry {
+		return false
+	}
+	return time.Now().After(expiry)
+}
+
+func (s *Store) expireIfNeededLocked(key string) {
+	if s.isExpiredLocked(key) {
+		delete(s.data, key)
+		delete(s.expirations, key)
+	}
+}
 
 func (s *Store) Set(key, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data[key] = value
+	delete(s.expirations, key)
 }
 
 func (s *Store) Get(key string) (string, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
 	raw, exists := s.data[key]
 	if !exists {
 		return "", false, nil
@@ -47,28 +58,31 @@ func (s *Store) Get(key string) (string, bool, error) {
 	return value, true, nil
 }
 
-// ---------- Generic key commands ----------
-
 func (s *Store) Del(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, exists := s.data[key]
 	if exists {
 		delete(s.data, key)
+		delete(s.expirations, key)
 	}
 	return exists
 }
 
 func (s *Store) Exists(key string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
 	_, exists := s.data[key]
 	return exists
 }
 
 func (s *Store) Keys() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.data {
+		s.expireIfNeededLocked(k)
+	}
 	keys := make([]string, 0, len(s.data))
 	for k := range s.data {
 		keys = append(keys, k)
@@ -76,12 +90,63 @@ func (s *Store) Keys() []string {
 	return keys
 }
 
-// ---------- List commands ----------
+func (s *Store) Expire(key string, seconds int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
+	_, exists := s.data[key]
+	if !exists {
+		return false
+	}
+	s.expirations[key] = time.Now().Add(time.Duration(seconds) * time.Second)
+	return true
+}
+
+func (s *Store) TTL(key string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
+	_, exists := s.data[key]
+	if !exists {
+		return -2
+	}
+	expiry, hasExpiry := s.expirations[key]
+	if !hasExpiry {
+		return -1
+	}
+	remaining := time.Until(expiry)
+	if remaining < 0 {
+		return -2
+	}
+	return int(remaining.Seconds())
+}
+
+func (s *Store) SetEx(key string, seconds int, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[key] = value
+	s.expirations[key] = time.Now().Add(time.Duration(seconds) * time.Second)
+}
+
+func (s *Store) CleanupExpired() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	now := time.Now()
+	for key, expiry := range s.expirations {
+		if now.After(expiry) {
+			delete(s.data, key)
+			delete(s.expirations, key)
+			removed++
+		}
+	}
+	return removed
+}
 
 func (s *Store) LPush(key string, values ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	s.expireIfNeededLocked(key)
 	list, err := s.getOrCreateList(key)
 	if err != nil {
 		return 0, err
@@ -96,7 +161,7 @@ func (s *Store) LPush(key string, values ...string) (int, error) {
 func (s *Store) RPush(key string, values ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	s.expireIfNeededLocked(key)
 	list, err := s.getOrCreateList(key)
 	if err != nil {
 		return 0, err
@@ -109,7 +174,7 @@ func (s *Store) RPush(key string, values ...string) (int, error) {
 func (s *Store) LPop(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	s.expireIfNeededLocked(key)
 	list, exists, err := s.getList(key)
 	if err != nil {
 		return "", false, err
@@ -126,7 +191,7 @@ func (s *Store) LPop(key string) (string, bool, error) {
 func (s *Store) RPop(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	s.expireIfNeededLocked(key)
 	list, exists, err := s.getList(key)
 	if err != nil {
 		return "", false, err
@@ -142,9 +207,9 @@ func (s *Store) RPop(key string) (string, bool, error) {
 }
 
 func (s *Store) LRange(key string, start, stop int) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
 	list, exists, err := s.getList(key)
 	if err != nil {
 		return nil, err
@@ -152,11 +217,9 @@ func (s *Store) LRange(key string, start, stop int) ([]string, error) {
 	if !exists || len(list) == 0 {
 		return []string{}, nil
 	}
-
 	length := len(list)
 	start = normalizeIndex(start, length)
 	stop = normalizeIndex(stop, length)
-
 	if start < 0 {
 		start = 0
 	}
@@ -166,26 +229,19 @@ func (s *Store) LRange(key string, start, stop int) ([]string, error) {
 	if start > stop || start >= length {
 		return []string{}, nil
 	}
-
 	result := make([]string, stop-start+1)
 	copy(result, list[start:stop+1])
 	return result, nil
 }
 
-// ---------- Set commands ----------
-
-// SAdd adds one or more members to the set at key, creating the set
-// if it doesn't exist. Returns the number of members that were
-// newly added (members already present don't count).
 func (s *Store) SAdd(key string, members ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	s.expireIfNeededLocked(key)
 	set, err := s.getOrCreateSet(key)
 	if err != nil {
 		return 0, err
 	}
-
 	added := 0
 	for _, m := range members {
 		if _, exists := set[m]; !exists {
@@ -197,12 +253,10 @@ func (s *Store) SAdd(key string, members ...string) (int, error) {
 	return added, nil
 }
 
-// SRem removes one or more members from the set at key.
-// Returns the number of members that were actually removed.
 func (s *Store) SRem(key string, members ...string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	s.expireIfNeededLocked(key)
 	set, exists, err := s.getSet(key)
 	if err != nil {
 		return 0, err
@@ -210,7 +264,6 @@ func (s *Store) SRem(key string, members ...string) (int, error) {
 	if !exists {
 		return 0, nil
 	}
-
 	removed := 0
 	for _, m := range members {
 		if _, exists := set[m]; exists {
@@ -222,11 +275,10 @@ func (s *Store) SRem(key string, members ...string) (int, error) {
 	return removed, nil
 }
 
-// SIsMember reports whether member is present in the set at key.
 func (s *Store) SIsMember(key, member string) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
 	set, exists, err := s.getSet(key)
 	if err != nil {
 		return false, err
@@ -238,13 +290,10 @@ func (s *Store) SIsMember(key, member string) (bool, error) {
 	return isMember, nil
 }
 
-// SMembers returns all members of the set at key, in no
-// guaranteed order (matching both Go's map iteration and real
-// Redis's own unordered set semantics).
 func (s *Store) SMembers(key string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
 	set, exists, err := s.getSet(key)
 	if err != nil {
 		return nil, err
@@ -252,7 +301,6 @@ func (s *Store) SMembers(key string) ([]string, error) {
 	if !exists {
 		return []string{}, nil
 	}
-
 	members := make([]string, 0, len(set))
 	for m := range set {
 		members = append(members, m)
@@ -260,7 +308,71 @@ func (s *Store) SMembers(key string) ([]string, error) {
 	return members, nil
 }
 
-// ---------- Internal helpers ----------
+func (s *Store) HSet(key, field, value string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
+	hash, err := s.getOrCreateHash(key)
+	if err != nil {
+		return false, err
+	}
+	_, existed := hash[field]
+	hash[field] = value
+	s.data[key] = hash
+	return !existed, nil
+}
+
+func (s *Store) HGet(key, field string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
+	hash, exists, err := s.getHash(key)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, nil
+	}
+	value, fieldExists := hash[field]
+	return value, fieldExists, nil
+}
+
+func (s *Store) HGetAll(key string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
+	hash, exists, err := s.getHash(key)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return []string{}, nil
+	}
+	result := make([]string, 0, len(hash)*2)
+	for field, value := range hash {
+		result = append(result, field, value)
+	}
+	return result, nil
+}
+
+func (s *Store) HDel(key, field string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireIfNeededLocked(key)
+	hash, exists, err := s.getHash(key)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	_, fieldExists := hash[field]
+	if fieldExists {
+		delete(hash, field)
+		s.data[key] = hash
+	}
+	return fieldExists, nil
+}
 
 func (s *Store) getList(key string) ([]string, bool, error) {
 	raw, exists := s.data[key]
@@ -308,95 +420,6 @@ func (s *Store) getOrCreateSet(key string) (map[string]struct{}, error) {
 	return set, nil
 }
 
-func normalizeIndex(idx, length int) int {
-	if idx < 0 {
-		return length + idx
-	}
-	return idx
-}
-
-// ---------- Hash commands ----------
-
-// HSet sets a single field to value within the hash stored at key,
-// creating the hash if it doesn't exist yet. Returns true if the
-// field was newly created, false if it already existed and was
-// just updated — matching real Redis's HSET return semantics.
-func (s *Store) HSet(key, field, value string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	hash, err := s.getOrCreateHash(key)
-	if err != nil {
-		return false, err
-	}
-
-	_, existed := hash[field]
-	hash[field] = value
-	s.data[key] = hash
-	return !existed, nil
-}
-
-// HGet retrieves the value of a single field within the hash at key.
-// The second return value reports whether the field (and key) existed.
-func (s *Store) HGet(key, field string) (string, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	hash, exists, err := s.getHash(key)
-	if err != nil {
-		return "", false, err
-	}
-	if !exists {
-		return "", false, nil
-	}
-	value, fieldExists := hash[field]
-	return value, fieldExists, nil
-}
-
-// HGetAll returns all field-value pairs in the hash at key, as a
-// flat slice: [field1, value1, field2, value2, ...]. Order is not
-// guaranteed, matching Go's map iteration and real Redis semantics.
-func (s *Store) HGetAll(key string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	hash, exists, err := s.getHash(key)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return []string{}, nil
-	}
-
-	result := make([]string, 0, len(hash)*2)
-	for field, value := range hash {
-		result = append(result, field, value)
-	}
-	return result, nil
-}
-
-// HDel removes a single field from the hash at key.
-// Returns true if the field existed and was deleted.
-func (s *Store) HDel(key, field string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	hash, exists, err := s.getHash(key)
-	if err != nil {
-		return false, err
-	}
-	if !exists {
-		return false, nil
-	}
-
-	_, fieldExists := hash[field]
-	if fieldExists {
-		delete(hash, field)
-		s.data[key] = hash
-	}
-	return fieldExists, nil
-}
-
 func (s *Store) getHash(key string) (map[string]string, bool, error) {
 	raw, exists := s.data[key]
 	if !exists {
@@ -418,4 +441,11 @@ func (s *Store) getOrCreateHash(key string) (map[string]string, error) {
 		return make(map[string]string), nil
 	}
 	return hash, nil
+}
+
+func normalizeIndex(idx, length int) int {
+	if idx < 0 {
+		return length + idx
+	}
+	return idx
 }

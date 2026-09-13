@@ -78,6 +78,12 @@ func (h *Handler) dispatch(cmd string, args []string) string {
 		return h.cmdHGetAll(args)
 	case "HDEL":
 		return h.cmdHDel(args)
+	case "EXPIRE":
+		return h.cmdExpire(args)
+	case "TTL":
+		return h.cmdTTL(args)
+	case "SETEX":
+		return h.cmdSetEx(args)
 	default:
 		return fmt.Sprintf("ERR unknown command '%s'", cmd)
 	}
@@ -343,4 +349,41 @@ func (h *Handler) cmdHDel(args []string) string {
 		return "1"
 	}
 	return "0"
+}
+
+// ---------- Expiration commands ----------
+
+func (h *Handler) cmdExpire(args []string) string {
+	if len(args) != 2 {
+		return "ERR wrong number of arguments for 'EXPIRE'"
+	}
+	seconds, err := strconv.Atoi(args[1])
+	if err != nil {
+		return "ERR value is not an integer or out of range"
+	}
+	set := h.store.Expire(args[0], seconds)
+	if set {
+		return "1"
+	}
+	return "0"
+}
+
+func (h *Handler) cmdTTL(args []string) string {
+	if len(args) != 1 {
+		return "ERR wrong number of arguments for 'TTL'"
+	}
+	ttl := h.store.TTL(args[0])
+	return strconv.Itoa(ttl)
+}
+
+func (h *Handler) cmdSetEx(args []string) string {
+	if len(args) != 3 {
+		return "ERR wrong number of arguments for 'SETEX'"
+	}
+	seconds, err := strconv.Atoi(args[1])
+	if err != nil {
+		return "ERR value is not an integer or out of range"
+	}
+	h.store.SetEx(args[0], seconds, args[2])
+	return "OK"
 }
