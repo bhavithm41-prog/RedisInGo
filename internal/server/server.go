@@ -5,16 +5,20 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/bhavithm41-prog/gocachedb/internal/command"
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
 
 // Server holds everything our TCP server needs: the port to listen
-// on, and a command handler backed by the shared in-memory store.
+// on, a command handler backed by the shared store, and a direct
+// reference to that same store for background maintenance tasks
+// like active expiration.
 type Server struct {
 	port    string
 	handler *command.Handler
+	store   *store.Store
 }
 
 // New creates a new Server bound to the given port, using the given store.
@@ -22,11 +26,13 @@ func New(port string, s *store.Store) *Server {
 	return &Server{
 		port:    port,
 		handler: command.New(s),
+		store:   s,
 	}
 }
 
 // Start begins listening for TCP connections and blocks forever,
-// accepting and handling clients as they connect.
+// accepting and handling clients as they connect. It also starts
+// a background goroutine that actively expires timed-out keys.
 func (srv *Server) Start() error {
 	listener, err := net.Listen("tcp", ":"+srv.port)
 	if err != nil {
@@ -35,6 +41,8 @@ func (srv *Server) Start() error {
 	defer listener.Close()
 
 	fmt.Println("GoCacheDB server listening on port", srv.port)
+
+	go srv.startExpirationCleanup(5 * time.Second)
 
 	for {
 		conn, err := listener.Accept()
@@ -72,5 +80,21 @@ func (srv *Server) handleConnection(conn net.Conn) {
 
 		writer.WriteString(response + "\n")
 		writer.Flush()
+	}
+}
+
+// startExpirationCleanup runs store.CleanupExpired() on a fixed
+// interval, forever, until the program exits. This is the "active
+// expiration" half of TTL support — it complements the lazy
+// expiration checks that already happen on every key access.
+func (srv *Server) startExpirationCleanup(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		removed := srv.store.CleanupExpired()
+		if removed > 0 {
+			fmt.Println("Active expiration: removed", removed, "expired key(s)")
+		}
 	}
 }
