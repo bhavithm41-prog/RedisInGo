@@ -21,11 +21,12 @@ type Server struct {
 	store   *store.Store
 }
 
-// New creates a new Server bound to the given port, using the given store.
-func New(port string, s *store.Store) *Server {
+// New creates a new Server bound to the given port, using the given
+// store, and persisting to (loading from) the given data file path.
+func New(port string, s *store.Store, dataFile string) *Server {
 	return &Server{
 		port:    port,
-		handler: command.New(s),
+		handler: command.New(s, dataFile),
 		store:   s,
 	}
 }
@@ -54,8 +55,6 @@ func (srv *Server) Start() error {
 	}
 }
 
-// handleConnection processes commands from a single client connection
-// until the client disconnects.
 func (srv *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -83,10 +82,6 @@ func (srv *Server) handleConnection(conn net.Conn) {
 	}
 }
 
-// startExpirationCleanup runs store.CleanupExpired() on a fixed
-// interval, forever, until the program exits. This is the "active
-// expiration" half of TTL support — it complements the lazy
-// expiration checks that already happen on every key access.
 func (srv *Server) startExpirationCleanup(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

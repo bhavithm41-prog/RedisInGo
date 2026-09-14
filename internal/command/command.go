@@ -8,12 +8,18 @@ import (
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
 
+// Handler holds a reference to the store, plus the file path used
+// for SAVE/BGSAVE, so it can execute commands and persist data
+// without the networking layer needing to know about file paths.
 type Handler struct {
-	store *store.Store
+	store    *store.Store
+	dataFile string
 }
 
-func New(s *store.Store) *Handler {
-	return &Handler{store: s}
+// New creates a new command Handler backed by the given store,
+// persisting to (and loading from) the given data file path.
+func New(s *store.Store, dataFile string) *Handler {
+	return &Handler{store: s, dataFile: dataFile}
 }
 
 func (h *Handler) Execute(line string) string {
@@ -84,6 +90,10 @@ func (h *Handler) dispatch(cmd string, args []string) string {
 		return h.cmdTTL(args)
 	case "SETEX":
 		return h.cmdSetEx(args)
+	case "SAVE":
+		return h.cmdSave(args)
+	case "BGSAVE":
+		return h.cmdBgSave(args)
 	default:
 		return fmt.Sprintf("ERR unknown command '%s'", cmd)
 	}
@@ -386,4 +396,34 @@ func (h *Handler) cmdSetEx(args []string) string {
 	}
 	h.store.SetEx(args[0], seconds, args[2])
 	return "OK"
+}
+
+// ---------- Persistence commands ----------
+
+// cmdSave synchronously saves the store to disk. The client waits
+// until the save completes before receiving a response.
+func (h *Handler) cmdSave(args []string) string {
+	if len(args) != 0 {
+		return "ERR wrong number of arguments for 'SAVE'"
+	}
+	if err := h.store.SaveToFile(h.dataFile); err != nil {
+		return "ERR " + err.Error()
+	}
+	return "OK"
+}
+
+// cmdBgSave starts a save in a background goroutine and returns
+// immediately, without blocking the calling client connection.
+func (h *Handler) cmdBgSave(args []string) string {
+	if len(args) != 0 {
+		return "ERR wrong number of arguments for 'BGSAVE'"
+	}
+	go func() {
+		if err := h.store.SaveToFile(h.dataFile); err != nil {
+			fmt.Println("BGSAVE failed:", err)
+		} else {
+			fmt.Println("BGSAVE completed successfully")
+		}
+	}()
+	return "Background saving started"
 }

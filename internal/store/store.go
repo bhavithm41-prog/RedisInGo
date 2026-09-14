@@ -1,7 +1,10 @@
 package store
 
 import (
+	"encoding/gob"
 	"errors"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -10,20 +13,33 @@ import (
 
 var ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 
-// Store is a thread-safe in-memory key-value store supporting
-// strings, lists, sets, hashes, per-key expiration, and LRU
-// eviction once a configured key-count capacity is exceeded.
+// init registers the concrete types that may be stored behind the
+// `any` interface in Store.data, so gob knows how to encode and
+// decode them during SaveToFile / LoadFromFile. Plain strings need
+// no registration since gob handles Go's basic types natively.
+func init() {
+	gob.Register([]string{})
+	gob.Register(map[string]struct{}{})
+	gob.Register(map[string]string{})
+}
+
+// snapshot is the exported, serializable shape of a Store's state.
+// Store's own fields are unexported (and include a mutex, which
+// can't be encoded), so we copy the relevant data into this plain
+// struct before encoding.
+type snapshot struct {
+	Data        map[string]any
+	Expirations map[string]time.Time
+}
+
 type Store struct {
 	mu          sync.RWMutex
 	data        map[string]any
 	expirations map[string]time.Time
 	lru         *eviction.LRU
-	evictions   int // total number of keys evicted since startup, for future metrics (Phase 10)
+	evictions   int
 }
 
-// New creates a new Store with the given maximum number of keys.
-// Once this many keys are present, inserting a new key evicts the
-// least recently used existing key.
 func New(maxKeys int) *Store {
 	return &Store{
 		data:        make(map[string]any),
@@ -48,10 +64,6 @@ func (s *Store) expireIfNeededLocked(key string) {
 	}
 }
 
-// touchAndEvictLocked records key as just-accessed, and if this
-// causes the LRU tracker to evict some other key, deletes that
-// evicted key's real data too. Must be called with the write lock
-// already held, since it may mutate s.data.
 func (s *Store) touchAndEvictLocked(key string) {
 	evictedKey, evicted := s.lru.Touch(key)
 	if evicted {
@@ -123,8 +135,6 @@ func (s *Store) Keys() []string {
 	return keys
 }
 
-// Evictions returns the total number of keys evicted due to the
-// LRU capacity limit since the store was created.
 func (s *Store) Evictions() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -186,6 +196,95 @@ func (s *Store) CleanupExpired() int {
 		}
 	}
 	return removed
+}
+
+// ---------- Persistence ----------
+
+// SaveToFile writes a complete snapshot of the store's current
+// state to path, using a temp-file-then-rename strategy so a crash
+// or power loss mid-write can never corrupt the existing snapshot.
+func (s *Store) SaveToFile(path string) error {
+	s.mu.RLock()
+	snap := snapshot{
+		Data:        make(map[string]any, len(s.data)),
+		Expirations: make(map[string]time.Time, len(s.expirations)),
+	}
+	for k, v := range s.data {
+		snap.Data[k] = v
+	}
+	for k, v := range s.expirations {
+		snap.Expirations[k] = v
+	}
+	s.mu.RUnlock()
+
+	tmpPath := path + ".tmp"
+	file, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp snapshot file: %w", err)
+	}
+
+	encoder := gob.NewEncoder(file)
+	if err := encoder.Encode(snap); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to encode snapshot: %w", err)
+	}
+
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close temp snapshot file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to atomically replace snapshot file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadFromFile reads a snapshot previously written by SaveToFile
+// and replaces the store's current contents with it. If the file
+// doesn't exist yet (first run), this is not an error — the store
+// simply starts empty. If the file exists but can't be decoded
+// (corrupted), an error is returned so the caller can decide how
+// to proceed, but the in-memory store itself is left untouched.
+func (s *Store) LoadFromFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to open snapshot file: %w", err)
+	}
+	defer file.Close()
+
+	var snap snapshot
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&snap); err != nil {
+		return fmt.Errorf("corrupt snapshot file, refusing to load: %w", err)
+	}
+
+	if snap.Data == nil {
+		snap.Data = make(map[string]any)
+	}
+	if snap.Expirations == nil {
+		snap.Expirations = make(map[string]time.Time)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.data = snap.Data
+	s.expirations = snap.Expirations
+
+	// Rebuild LRU recency order from the loaded keys. Order among
+	// them is arbitrary here (map iteration), but this correctly
+	// re-establishes tracking so future evictions work properly.
+	for key := range s.data {
+		s.lru.Touch(key)
+	}
+
+	return nil
 }
 
 // ---------- List commands ----------
