@@ -28,22 +28,31 @@ func New(port string, s *store.Store, dataFile string, m *metrics.Metrics) *Serv
 	}
 }
 
+// Start binds to srv.port and serves forever. This is the normal
+// entry point used by main.go.
 func (srv *Server) Start() error {
 	listener, err := net.Listen("tcp", ":"+srv.port)
 	if err != nil {
 		return fmt.Errorf("failed to start listener: %w", err)
 	}
+	return srv.Serve(listener)
+}
+
+// Serve accepts and handles connections on an already-created
+// listener, and blocks forever. Splitting this out from Start lets
+// tests supply their own listener — e.g. bound to port 0, so the OS
+// assigns a free port and guarantees no collisions between tests.
+func (srv *Server) Serve(listener net.Listener) error {
 	defer listener.Close()
 
-	fmt.Println("GoCacheDB server listening on port", srv.port)
+	fmt.Println("GoCacheDB server listening on", listener.Addr())
 
 	go srv.startExpirationCleanup(5 * time.Second)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error accepting connection:", err)
-			continue
+			return fmt.Errorf("accept error: %w", err)
 		}
 		go srv.handleConnection(conn)
 	}
