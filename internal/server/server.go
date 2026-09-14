@@ -77,7 +77,7 @@ func (srv *Server) handleConnection(conn net.Conn) {
 
 		response := srv.handler.Execute(line)
 
-		writer.WriteString(response + "\n")
+		writer.WriteString(response)
 		writer.Flush()
 	}
 }
