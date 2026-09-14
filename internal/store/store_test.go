@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/bhavithm41-prog/gocachedb/internal/metrics"
 )
 
 func TestConcurrentAccess(t *testing.T) {
-	s := New(1000)
+	s := New(1000, metrics.New())
 
 	var wg sync.WaitGroup
 
@@ -27,21 +29,15 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// TestLRUEviction verifies that once the store exceeds its
-// configured key capacity, the least recently used key is evicted
-// — and that its actual data is really gone, not just untracked.
 func TestLRUEviction(t *testing.T) {
-	s := New(3) // capacity: only 3 keys allowed at once
+	s := New(3, metrics.New())
 
 	s.Set("a", "1")
 	s.Set("b", "2")
 	s.Set("c", "3")
-	// Store is now full: [c, b, a] from most- to least-recently-used.
 
-	// Access "a" so it becomes most recently used, making "b" the LRU key.
 	_, _, _ = s.Get("a")
 
-	// Inserting "d" should evict "b" (the least recently used), not "a" or "c".
 	s.Set("d", "4")
 
 	if _, exists, _ := s.Get("b"); exists {

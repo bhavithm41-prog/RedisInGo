@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bhavithm41-prog/gocachedb/internal/metrics"
 	"github.com/bhavithm41-prog/gocachedb/internal/resp"
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
@@ -11,21 +12,19 @@ import (
 type Handler struct {
 	store    *store.Store
 	dataFile string
+	metrics  *metrics.Metrics
 }
 
-func New(s *store.Store, dataFile string) *Handler {
-	return &Handler{store: s, dataFile: dataFile}
+func New(s *store.Store, dataFile string, m *metrics.Metrics) *Handler {
+	return &Handler{store: s, dataFile: dataFile, metrics: m}
 }
 
-// Execute parses a raw line of text into a command and arguments,
-// runs the command against the store, and returns a fully
-// RESP-encoded reply string (including its own trailing \r\n) —
-// the caller should write this directly, with no extra newline.
 func (h *Handler) Execute(line string) string {
 	cmd, args := parseLine(line)
 	if cmd == "" {
 		return resp.Error("ERR empty command")
 	}
+	h.metrics.IncrCommands()
 	return h.dispatch(cmd, args)
 }
 
@@ -93,12 +92,12 @@ func (h *Handler) dispatch(cmd string, args []string) string {
 		return h.cmdSave(args)
 	case "BGSAVE":
 		return h.cmdBgSave(args)
+	case "INFO":
+		return h.cmdInfo(args)
 	default:
 		return resp.Error("ERR unknown command '" + cmd + "'")
 	}
 }
-
-// ---------- String / generic commands ----------
 
 func (h *Handler) cmdPing(args []string) string {
 	if len(args) != 0 {
@@ -111,6 +110,7 @@ func (h *Handler) cmdSet(args []string) string {
 	if len(args) != 2 {
 		return resp.Error("ERR wrong number of arguments for 'SET'")
 	}
+	h.metrics.IncrSet()
 	h.store.Set(args[0], args[1])
 	return resp.SimpleString("OK")
 }
@@ -119,6 +119,7 @@ func (h *Handler) cmdGet(args []string) string {
 	if len(args) != 1 {
 		return resp.Error("ERR wrong number of arguments for 'GET'")
 	}
+	h.metrics.IncrGet()
 	value, exists, err := h.store.Get(args[0])
 	if err != nil {
 		return resp.Error("ERR " + err.Error())
@@ -173,8 +174,6 @@ func (h *Handler) cmdFlushDB(args []string) string {
 	}
 	return resp.SimpleString("OK")
 }
-
-// ---------- List commands ----------
 
 func (h *Handler) cmdLPush(args []string) string {
 	if len(args) < 2 {
@@ -243,8 +242,6 @@ func (h *Handler) cmdLRange(args []string) string {
 	return resp.StringArray(result)
 }
 
-// ---------- Set commands ----------
-
 func (h *Handler) cmdSAdd(args []string) string {
 	if len(args) < 2 {
 		return resp.Error("ERR wrong number of arguments for 'SADD'")
@@ -291,8 +288,6 @@ func (h *Handler) cmdSMembers(args []string) string {
 	}
 	return resp.StringArray(members)
 }
-
-// ---------- Hash commands ----------
 
 func (h *Handler) cmdHSet(args []string) string {
 	if len(args) != 3 {
@@ -347,8 +342,6 @@ func (h *Handler) cmdHDel(args []string) string {
 	return resp.Integer(0)
 }
 
-// ---------- Expiration commands ----------
-
 func (h *Handler) cmdExpire(args []string) string {
 	if len(args) != 2 {
 		return resp.Error("ERR wrong number of arguments for 'EXPIRE'")
@@ -384,8 +377,6 @@ func (h *Handler) cmdSetEx(args []string) string {
 	return resp.SimpleString("OK")
 }
 
-// ---------- Persistence commands ----------
-
 func (h *Handler) cmdSave(args []string) string {
 	if len(args) != 0 {
 		return resp.Error("ERR wrong number of arguments for 'SAVE'")
@@ -404,4 +395,12 @@ func (h *Handler) cmdBgSave(args []string) string {
 		_ = h.store.SaveToFile(h.dataFile)
 	}()
 	return resp.SimpleString("Background saving started")
+}
+
+func (h *Handler) cmdInfo(args []string) string {
+	if len(args) != 0 {
+		return resp.Error("ERR wrong number of arguments for 'INFO'")
+	}
+	report := h.metrics.Snapshot(h.store.Evictions(), len(h.store.Keys()))
+	return resp.BulkString(report)
 }

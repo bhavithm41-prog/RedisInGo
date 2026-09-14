@@ -9,24 +9,17 @@ import (
 	"time"
 
 	"github.com/bhavithm41-prog/gocachedb/internal/eviction"
+	"github.com/bhavithm41-prog/gocachedb/internal/metrics"
 )
 
 var ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 
-// init registers the concrete types that may be stored behind the
-// `any` interface in Store.data, so gob knows how to encode and
-// decode them during SaveToFile / LoadFromFile. Plain strings need
-// no registration since gob handles Go's basic types natively.
 func init() {
 	gob.Register([]string{})
 	gob.Register(map[string]struct{}{})
 	gob.Register(map[string]string{})
 }
 
-// snapshot is the exported, serializable shape of a Store's state.
-// Store's own fields are unexported (and include a mutex, which
-// can't be encoded), so we copy the relevant data into this plain
-// struct before encoding.
 type snapshot struct {
 	Data        map[string]any
 	Expirations map[string]time.Time
@@ -38,13 +31,17 @@ type Store struct {
 	expirations map[string]time.Time
 	lru         *eviction.LRU
 	evictions   int
+	metrics     *metrics.Metrics
 }
 
-func New(maxKeys int) *Store {
+// New creates a new Store with the given maximum number of keys and
+// the given Metrics tracker for recording cache hits/misses.
+func New(maxKeys int, m *metrics.Metrics) *Store {
 	return &Store{
 		data:        make(map[string]any),
 		expirations: make(map[string]time.Time),
 		lru:         eviction.New(maxKeys),
+		metrics:     m,
 	}
 }
 
@@ -83,6 +80,8 @@ func (s *Store) Set(key, value string) {
 	s.touchAndEvictLocked(key)
 }
 
+// Get retrieves a string value for key, recording a cache hit or
+// miss on the Metrics tracker as it does so.
 func (s *Store) Get(key string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -90,6 +89,7 @@ func (s *Store) Get(key string) (string, bool, error) {
 
 	raw, exists := s.data[key]
 	if !exists {
+		s.metrics.IncrMiss()
 		return "", false, nil
 	}
 	value, ok := raw.(string)
@@ -97,6 +97,7 @@ func (s *Store) Get(key string) (string, bool, error) {
 		return "", true, ErrWrongType
 	}
 	s.touchAndEvictLocked(key)
+	s.metrics.IncrHit()
 	return value, true, nil
 }
 
@@ -200,9 +201,6 @@ func (s *Store) CleanupExpired() int {
 
 // ---------- Persistence ----------
 
-// SaveToFile writes a complete snapshot of the store's current
-// state to path, using a temp-file-then-rename strategy so a crash
-// or power loss mid-write can never corrupt the existing snapshot.
 func (s *Store) SaveToFile(path string) error {
 	s.mu.RLock()
 	snap := snapshot{
@@ -242,12 +240,6 @@ func (s *Store) SaveToFile(path string) error {
 	return nil
 }
 
-// LoadFromFile reads a snapshot previously written by SaveToFile
-// and replaces the store's current contents with it. If the file
-// doesn't exist yet (first run), this is not an error — the store
-// simply starts empty. If the file exists but can't be decoded
-// (corrupted), an error is returned so the caller can decide how
-// to proceed, but the in-memory store itself is left untouched.
 func (s *Store) LoadFromFile(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -277,9 +269,6 @@ func (s *Store) LoadFromFile(path string) error {
 	s.data = snap.Data
 	s.expirations = snap.Expirations
 
-	// Rebuild LRU recency order from the loaded keys. Order among
-	// them is arbitrary here (map iteration), but this correctly
-	// re-establishes tracking so future evictions work properly.
 	for key := range s.data {
 		s.lru.Touch(key)
 	}

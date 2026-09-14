@@ -8,32 +8,26 @@ import (
 	"time"
 
 	"github.com/bhavithm41-prog/gocachedb/internal/command"
+	"github.com/bhavithm41-prog/gocachedb/internal/metrics"
 	"github.com/bhavithm41-prog/gocachedb/internal/store"
 )
 
-// Server holds everything our TCP server needs: the port to listen
-// on, a command handler backed by the shared store, and a direct
-// reference to that same store for background maintenance tasks
-// like active expiration.
 type Server struct {
 	port    string
 	handler *command.Handler
 	store   *store.Store
+	metrics *metrics.Metrics
 }
 
-// New creates a new Server bound to the given port, using the given
-// store, and persisting to (loading from) the given data file path.
-func New(port string, s *store.Store, dataFile string) *Server {
+func New(port string, s *store.Store, dataFile string, m *metrics.Metrics) *Server {
 	return &Server{
 		port:    port,
-		handler: command.New(s, dataFile),
+		handler: command.New(s, dataFile, m),
 		store:   s,
+		metrics: m,
 	}
 }
 
-// Start begins listening for TCP connections and blocks forever,
-// accepting and handling clients as they connect. It also starts
-// a background goroutine that actively expires timed-out keys.
 func (srv *Server) Start() error {
 	listener, err := net.Listen("tcp", ":"+srv.port)
 	if err != nil {
@@ -57,6 +51,9 @@ func (srv *Server) Start() error {
 
 func (srv *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+
+	srv.metrics.ClientConnected()
+	defer srv.metrics.ClientDisconnected()
 
 	fmt.Println("Client connected:", conn.RemoteAddr())
 
